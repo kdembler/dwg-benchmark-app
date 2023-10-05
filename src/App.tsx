@@ -89,8 +89,15 @@ type TestResult =
 
 async function runTest(url: string, chunkSize: number): Promise<TestResult> {
   try {
+    const controller = new AbortController();
+    const signal = controller.signal;
     const startFetchTime = performance.now();
-    const response = await fetch(url);
+
+    const timeoutId = setTimeout(() => controller.abort(), 5000);
+
+    const response = await fetch(url, { signal });
+    clearTimeout(timeoutId);
+
     const ttfb = performance.now() - startFetchTime;
 
     if (!response.ok) {
@@ -216,8 +223,10 @@ export const App = () => {
     (acc, result) => {
       if ("error" in result) return acc;
       return {
-        ttfb: acc.ttfb + result.ttfb,
-        downloadSpeedBps: acc.downloadSpeedBps + result.downloadSpeedBps,
+        totalTtfb: acc.totalTtfb + result.ttfb,
+        lowestTtfb: acc.lowestTtfb > result.ttfb ? result.ttfb : acc.lowestTtfb,
+        totalDownloadSpeedBps:
+          acc.totalDownloadSpeedBps + result.downloadSpeedBps,
         bestDownloadSpeedBps:
           acc.bestDownloadSpeedBps > result.downloadSpeedBps
             ? acc.bestDownloadSpeedBps
@@ -229,20 +238,24 @@ export const App = () => {
       };
     },
     {
-      ttfb: 0,
-      downloadSpeedBps: 0,
+      totalTtfb: 0,
+      lowestTtfb: Number.MAX_SAFE_INTEGER,
+      totalDownloadSpeedBps: 0,
       bestDownloadSpeedBps: Number.MIN_SAFE_INTEGER,
       worstDownloadSpeedBps: Number.MAX_SAFE_INTEGER,
     }
   );
-  const stats = _stats
-    ? {
-        ttfb: _stats.ttfb / testState.results!.length,
-        downloadSpeedBps: _stats.downloadSpeedBps / testState.results!.length,
-        bestDownloadSpeedBps: _stats.bestDownloadSpeedBps,
-        worstDownloadSpeedBps: _stats.worstDownloadSpeedBps,
-      }
-    : null;
+  const stats =
+    _stats && testState.results
+      ? {
+          avgTtfb: _stats.totalTtfb / testState.results.length,
+          lowestTtfb: _stats.lowestTtfb,
+          avgDownloadSpeedBps:
+            _stats.totalDownloadSpeedBps / testState.results.length,
+          bestDownloadSpeedBps: _stats.bestDownloadSpeedBps,
+          worstDownloadSpeedBps: _stats.worstDownloadSpeedBps,
+        }
+      : null;
 
   return (
     <Container
@@ -272,6 +285,7 @@ export const App = () => {
                 onChange={(e) => setChunkSize(e.target.value as number)}
                 disabled={testState.isRunning}
               >
+                <MenuItem value={1024 * 1024 * 10}>10MB</MenuItem>
                 <MenuItem value={1024 * 1024 * 25}>25MB</MenuItem>
                 <MenuItem value={1024 * 1024 * 50}>50MB</MenuItem>
                 <MenuItem value={1024 * 1024 * 100}>100MB</MenuItem>
@@ -328,14 +342,15 @@ export const App = () => {
             <Grid xs={12}>
               <Alert severity="info">
                 <span>
-                  Average TTFB: {stats?.ttfb.toFixed(2)}ms
+                  Best TTFB: {stats?.lowestTtfb.toFixed(2)}ms
                   <br />
-                  Average download speed:{" "}
-                  {(stats?.downloadSpeedBps / 1024 / 1024).toFixed(2)}MB/s
+                  Average TTFB: {stats?.avgTtfb.toFixed(2)}ms
                   <br />
                   Best download speed:{" "}
-                  {(stats?.bestDownloadSpeedBps / 1024 / 1024).toFixed(2)}
-                  MB/s
+                  {(stats?.bestDownloadSpeedBps / 1024 / 1024).toFixed(2)}MB/s
+                  <br />
+                  Average download speed:{" "}
+                  {(stats?.avgDownloadSpeedBps / 1024 / 1024).toFixed(2)}MB/s
                   <br />
                   Worst download speed:{" "}
                   {(stats?.worstDownloadSpeedBps / 1024 / 1024).toFixed(2)}
