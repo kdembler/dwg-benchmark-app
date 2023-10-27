@@ -20,6 +20,19 @@ type ErrorBenchmarkResult = {
 
 export type BenchmarkResult = SuccessBenchmarkResult | ErrorBenchmarkResult;
 
+async function withTimeout<T>(
+  promise: Promise<T>,
+  timeout: number
+): Promise<T | null> {
+  return new Promise((resolve) => {
+    const timeoutId = setTimeout(() => resolve(null), timeout);
+    promise.then((result) => {
+      clearTimeout(timeoutId);
+      resolve(result);
+    });
+  });
+}
+
 export async function runBenchmark(
   url: string,
   maxDownloadSize: number,
@@ -29,10 +42,23 @@ export async function runBenchmark(
     throw new Error("numRuns must be at least 1");
   }
 
+  const maxTime = 20000;
+
   const results: BenchmarkResult[] = [];
   for (let i = 0; i < numRuns; i++) {
-    const result = await runSingleBenchmark(url, maxDownloadSize);
-    results.push(result);
+    const result = await withTimeout(
+      runSingleBenchmark(url, maxDownloadSize, maxTime),
+      maxTime + 200
+    );
+    if (!result) {
+      results.push({
+        status: "error",
+        url,
+        error: "unexpected timeout",
+      });
+    } else {
+      results.push(result);
+    }
     await new Promise((resolve) => setTimeout(resolve, 200));
   }
   return aggregateBenchmarkResults(results);
@@ -40,20 +66,31 @@ export async function runBenchmark(
 
 async function runSingleBenchmark(
   url: string,
-  maxDownloadSize: number
+  maxDownloadSize: number,
+  maxTime: number
 ): Promise<BenchmarkResult> {
   console.log(`Running test for ${url}`);
+  let hasTimedOut = false;
   try {
     const controller = new AbortController();
     const signal = controller.signal;
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
+    const fullTimeoutId = setTimeout(() => {
+      hasTimedOut = true;
+      return controller.abort();
+    }, maxTime);
+    const responseTimeoutId = setTimeout(() => {
+      hasTimedOut = true;
+      clearTimeout(fullTimeoutId);
+      return controller.abort();
+    }, 5000);
 
     const startFetchTime = performance.now();
     const headers = new Headers({
       Range: `bytes=0-${maxDownloadSize - 1}`,
+      "Cache-Control": "no-cache",
     });
     const response = await fetch(url, { signal, headers });
-    clearTimeout(timeoutId);
+    clearTimeout(responseTimeoutId);
 
     const responseStartTime = performance.now();
 
@@ -67,6 +104,7 @@ async function runSingleBenchmark(
 
     const startReadTime = performance.now();
     const receivedSize = (await response.arrayBuffer()).byteLength;
+    clearTimeout(fullTimeoutId);
     const endFetchTime = performance.now();
     const readTime = endFetchTime - startReadTime;
 
@@ -119,7 +157,7 @@ async function runSingleBenchmark(
     return {
       status: "error",
       url,
-      error: (e as any)?.message,
+      error: hasTimedOut ? `timeout ${maxTime}` : (e as any)?.message,
     };
   }
 }
