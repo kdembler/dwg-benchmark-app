@@ -138,6 +138,15 @@ async function runSingleBenchmark(
       downloadTime = readTime;
     }
 
+    if (totalRequestTime < 50) {
+      // too good to be true
+      return {
+        status: "error",
+        url,
+        error: "too good to be true",
+      };
+    }
+
     const downloadSpeedBps = (receivedSize * 8) / (downloadTime / 1000); // bits per second
 
     return {
