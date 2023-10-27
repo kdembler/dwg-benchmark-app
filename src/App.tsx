@@ -1,159 +1,36 @@
-import { graphql } from "./gql/gql";
-import request from "graphql-request";
 import TextField from "@mui/material/TextField";
 import Container from "@mui/material/Container";
 import {
   Alert,
   Button,
   Card,
-  CircularProgress,
   FormControl,
   FormHelperText,
   InputLabel,
   MenuItem,
-  Paper,
   Select,
   Typography,
 } from "@mui/material";
 import Grid from "@mui/material/Unstable_Grid2";
 import { useState } from "react";
+import { TestObject, gatherTestObjects } from "./testData";
+import { BenchmarkResult, runBenchmark } from "./benchmark";
+import SpeedTest, { Results } from "@cloudflare/speedtest";
+import { v4 as uuidv4 } from "uuid";
+import { useLocalStorage } from "@uidotdev/usehooks";
 
-const getVideoQueryDocument = graphql(/* GraphQL */ `
-  query GetVideo($id: ID!) {
-    videoByUniqueInput(where: { id: $id }) {
-      media {
-        id
-        size
-        storageBag {
-          distributionBuckets {
-            id
-            distributing
-            operators {
-              metadata {
-                nodeEndpoint
-              }
-            }
-          }
-        }
-      }
-    }
-  }
-`);
-
-async function prepareTestData(id: string) {
-  const data = await request(
-    "https://query.joystream.org/graphql",
-    getVideoQueryDocument,
-    { id }
-  );
-  const video = data?.videoByUniqueInput;
-  if (!video) {
-    return null;
-  }
-  const { media } = video;
-  if (!media) {
-    console.error("No media found");
-    return null;
-  }
-  const urls = media.storageBag.distributionBuckets.flatMap((bucket) => {
-    if (!bucket.distributing) return [];
-    return bucket.operators.flatMap((operator) => {
-      const endpoint = operator.metadata?.nodeEndpoint;
-      if (!endpoint) return [];
-      return `${endpoint}api/v1/assets/${media.id}`;
-    });
-  });
-  return {
-    id: id!,
-    size: media.size,
-    urls,
-  };
-}
-
-type TestData = NonNullable<Awaited<ReturnType<typeof prepareTestData>>>;
-
-type TestResult =
-  | {
-      ttfb: number;
-      totalFetchTime: number;
-      downloadTime: number;
-      downloadSpeedBps: number;
-      size: number;
-      url: string;
-      cacheStatus: string;
-    }
-  | {
-      url: string;
-      error: string;
-    };
-
-async function runTest(url: string, chunkSize: number): Promise<TestResult> {
-  try {
-    const controller = new AbortController();
-    const signal = controller.signal;
-    const startFetchTime = performance.now();
-
-    const timeoutId = setTimeout(() => controller.abort(), 5000);
-
-    const response = await fetch(url, { signal });
-    clearTimeout(timeoutId);
-
-    const ttfb = performance.now() - startFetchTime;
-
-    if (!response.ok) {
-      return {
-        url,
-        error: `Failed with status ${response.status} ${response.statusText}`,
-      };
-    }
-
-    const reader = response.body?.getReader();
-    if (!reader) {
-      return {
-        url,
-        error: "Couldn't read response body",
-      };
-    }
-    let receivedLength = 0;
-
-    const startReadTime = performance.now();
-    while (true) {
-      const { done, value } = await reader.read();
-      if (done) break;
-
-      receivedLength += value.length;
-      if (receivedLength >= chunkSize) {
-        await reader.cancel();
-        break;
-      }
-    }
-    const endFetchTime = performance.now();
-    const readTime = endFetchTime - startReadTime;
-    const downloadSpeedBps = receivedLength / (readTime / 1000);
-
-    return {
-      ttfb,
-      totalFetchTime: endFetchTime - startFetchTime,
-      downloadTime: readTime,
-      downloadSpeedBps,
-      size: receivedLength,
-      url: url,
-      cacheStatus: response.headers.get("X-Cache") || "unknown",
-    };
-  } catch (e) {
-    return {
-      url,
-      error: (e as any)?.message,
-    };
-  }
-}
+type ExtendedBenchmarkResult = BenchmarkResult & {
+  objectType: TestObject["type"];
+  uid: string;
+  referenceDownloadSpeedBps: number;
+  referenceLatency: number;
+};
 
 type TestState = {
-  results: TestResult[] | null;
-  metadata: TestData | null;
+  results: ExtendedBenchmarkResult[] | null;
+  totalUrls: number | null;
   error: string | null;
   isRunning: boolean;
-  displayResult: boolean;
 };
 
 export const App = () => {
@@ -161,11 +38,11 @@ export const App = () => {
   const [chunkSize, setChunkSize] = useState(1024 * 1024 * 50);
   const [testState, setTestState] = useState<TestState>({
     results: null,
-    metadata: null,
+    totalUrls: null,
     error: null,
     isRunning: false,
-    displayResult: false,
   });
+  const [uid] = useLocalStorage("uid", uuidv4());
 
   const startTest = async () => {
     if (isNaN(parseInt(testVideoId))) {
@@ -179,12 +56,35 @@ export const App = () => {
       ...state,
       isRunning: true,
       results: null,
-      metadata: null,
+      totalUrls: null,
       error: null,
-      displayResult: false,
     }));
-    const testData = await prepareTestData(testVideoId);
-    if (!testData) {
+
+    const speedTest = new SpeedTest({
+      measurements: [
+        { type: "latency", numPackets: 1 },
+        { type: "download", bytes: 1e5, count: 1, bypassMinDuration: true },
+        { type: "latency", numPackets: 20 },
+        { type: "download", bytes: 1e5, count: 5 },
+        { type: "download", bytes: 1e6, count: 5 },
+        { type: "packetLoss", numPackets: 1e3, responsesWaitTime: 3000 },
+        { type: "download", bytes: 1e7, count: 3 },
+        { type: "download", bytes: 2.5e7, count: 2 },
+        { type: "download", bytes: 1e8, count: 1 },
+        { type: "download", bytes: 2.5e8, count: 1 },
+      ],
+    });
+
+    const speedTestResults = await new Promise<Results>((resolve, reject) => {
+      speedTest.onFinish = (results) => resolve(results);
+      speedTest.onError = (error) => reject(error);
+    });
+    const referenceDownloadSpeedBps =
+      speedTestResults.getDownloadBandwidth() ?? 0;
+    const referenceLatency = speedTestResults.getUnloadedLatency() ?? 0;
+
+    const testObjects = await gatherTestObjects(testVideoId);
+    if (!testObjects) {
       setTestState((state) => ({
         ...state,
         isRunning: false,
@@ -192,13 +92,27 @@ export const App = () => {
       }));
       return;
     }
-    setTestState((state) => ({ ...state, metadata: testData }));
-    for (const url of testData.urls) {
-      const result = await runTest(url, chunkSize);
-      setTestState((state) => ({
-        ...state,
-        results: [...(state.results || []), result],
-      }));
+    const totalUrls = testObjects.reduce(
+      (acc, obj) => acc + obj.urls.length,
+      0
+    );
+    setTestState((state) => ({ ...state, totalUrls }));
+
+    for (const testObject of testObjects) {
+      for (const url of testObject.urls) {
+        const result = await runBenchmark(url, chunkSize);
+        const extendedResult: ExtendedBenchmarkResult = {
+          ...result,
+          objectType: testObject.type,
+          uid,
+          referenceDownloadSpeedBps,
+          referenceLatency,
+        };
+        setTestState((state) => ({
+          ...state,
+          results: [...(state.results || []), extendedResult],
+        }));
+      }
     }
     setTestState((state) => ({ ...state, isRunning: false }));
   };
@@ -214,8 +128,6 @@ export const App = () => {
     a.href = url;
     a.download = `benchmark-${testVideoId}-${Date.now()}.json`;
     a.click();
-
-    setTestState((state) => ({ ...state, displayResult: true }));
   };
 
   // average ttfb, average download speed, best download speed, worst download speed
@@ -231,10 +143,6 @@ export const App = () => {
           acc.bestDownloadSpeedBps > result.downloadSpeedBps
             ? acc.bestDownloadSpeedBps
             : result.downloadSpeedBps,
-        worstDownloadSpeedBps:
-          acc.worstDownloadSpeedBps < result.downloadSpeedBps
-            ? acc.worstDownloadSpeedBps
-            : result.downloadSpeedBps,
       };
     },
     {
@@ -242,7 +150,6 @@ export const App = () => {
       lowestTtfb: Number.MAX_SAFE_INTEGER,
       totalDownloadSpeedBps: 0,
       bestDownloadSpeedBps: Number.MIN_SAFE_INTEGER,
-      worstDownloadSpeedBps: Number.MAX_SAFE_INTEGER,
     }
   );
   const stats =
@@ -253,7 +160,6 @@ export const App = () => {
           avgDownloadSpeedBps:
             _stats.totalDownloadSpeedBps / testState.results.length,
           bestDownloadSpeedBps: _stats.bestDownloadSpeedBps,
-          worstDownloadSpeedBps: _stats.worstDownloadSpeedBps,
         }
       : null;
 
@@ -265,6 +171,9 @@ export const App = () => {
       }}
     >
       <Card sx={{ paddingBlock: 4, paddingInline: 2 }} elevation={4}>
+        <Typography variant="h5" component="div" sx={{ paddingBottom: 3 }}>
+          Joystream CDN Benchmark
+        </Typography>
         <Grid container spacing={2}>
           {/* inputs */}
           <Grid xs={12} sm={4}>
@@ -332,29 +241,32 @@ export const App = () => {
           {testState.isRunning && (
             <Grid xs={12}>
               <Alert severity="info">
-                Running test: {testState.results?.length || 0}/
-                {testState.metadata?.urls.length || 0}
+                {testState.totalUrls ? (
+                  <span>
+                    Running test: {testState.results?.length || 0}/
+                    {testState.totalUrls || 0}
+                  </span>
+                ) : (
+                  <span>Preparing test...</span>
+                )}
               </Alert>
             </Grid>
           )}
 
-          {stats && testState.displayResult && (
+          {stats && !testState.isRunning && (
             <Grid xs={12}>
               <Alert severity="info">
+                <Typography variant="h6">Test results</Typography>
                 <span>
                   Best TTFB: {stats?.lowestTtfb.toFixed(2)}ms
                   <br />
                   Average TTFB: {stats?.avgTtfb.toFixed(2)}ms
                   <br />
                   Best download speed:{" "}
-                  {(stats?.bestDownloadSpeedBps / 1024 / 1024).toFixed(2)}MB/s
+                  {(stats?.bestDownloadSpeedBps / 1024 / 1024).toFixed(2)}Mbps
                   <br />
                   Average download speed:{" "}
-                  {(stats?.avgDownloadSpeedBps / 1024 / 1024).toFixed(2)}MB/s
-                  <br />
-                  Worst download speed:{" "}
-                  {(stats?.worstDownloadSpeedBps / 1024 / 1024).toFixed(2)}
-                  MB/s
+                  {(stats?.avgDownloadSpeedBps / 1024 / 1024).toFixed(2)}Mbps
                 </span>
               </Alert>
             </Grid>
