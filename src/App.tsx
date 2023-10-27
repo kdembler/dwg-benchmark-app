@@ -100,7 +100,7 @@ export const App = () => {
           uid,
           referenceDownloadSpeedBps,
           referenceLatency,
-          version: "0.1.0",
+          version: "0.2.0",
         };
         if (result.status === "success") {
           console.log(
