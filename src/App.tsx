@@ -15,15 +15,20 @@ import Grid from "@mui/material/Unstable_Grid2";
 import { useState } from "react";
 import { TestObject, gatherTestObjects } from "./testData";
 import { BenchmarkResult, runBenchmark } from "./benchmark";
-import SpeedTest, { Results } from "@cloudflare/speedtest";
 import { v4 as uuidv4 } from "uuid";
 import { useLocalStorage } from "@uidotdev/usehooks";
+import { performSpeedTest } from "./speedtest";
+import { formatMbps, formatMs } from "./utils";
+
+const TESTS_COUNT = 3;
+const PUBLISH_RESULTS = !!import.meta.env.PROD;
 
 type ExtendedBenchmarkResult = BenchmarkResult & {
   objectType: TestObject["type"];
   uid: string;
   referenceDownloadSpeedBps: number;
   referenceLatency: number;
+  version: string;
 };
 
 type TestState = {
@@ -35,7 +40,7 @@ type TestState = {
 
 export const App = () => {
   const [testVideoId, setTestVideoId] = useState("131701");
-  const [chunkSize, setChunkSize] = useState(1024 * 1024 * 50);
+  const [chunkSize, setChunkSize] = useState(25 * 1e6);
   const [testState, setTestState] = useState<TestState>({
     results: null,
     totalUrls: null,
@@ -60,28 +65,14 @@ export const App = () => {
       error: null,
     }));
 
-    const speedTest = new SpeedTest({
-      measurements: [
-        { type: "latency", numPackets: 1 },
-        { type: "download", bytes: 1e5, count: 1, bypassMinDuration: true },
-        { type: "latency", numPackets: 20 },
-        { type: "download", bytes: 1e5, count: 5 },
-        { type: "download", bytes: 1e6, count: 5 },
-        { type: "packetLoss", numPackets: 1e3, responsesWaitTime: 3000 },
-        { type: "download", bytes: 1e7, count: 3 },
-        { type: "download", bytes: 2.5e7, count: 2 },
-        { type: "download", bytes: 1e8, count: 1 },
-        { type: "download", bytes: 2.5e8, count: 1 },
-      ],
-    });
+    const { referenceDownloadSpeedBps, referenceLatency } =
+      await performSpeedTest();
 
-    const speedTestResults = await new Promise<Results>((resolve, reject) => {
-      speedTest.onFinish = (results) => resolve(results);
-      speedTest.onError = (error) => reject(error);
-    });
-    const referenceDownloadSpeedBps =
-      speedTestResults.getDownloadBandwidth() ?? 0;
-    const referenceLatency = speedTestResults.getUnloadedLatency() ?? 0;
+    console.log(
+      "Reference download speed",
+      formatMbps(referenceDownloadSpeedBps)
+    );
+    console.log("Reference latency", formatMs(referenceLatency));
 
     const testObjects = await gatherTestObjects(testVideoId);
     if (!testObjects) {
@@ -98,39 +89,61 @@ export const App = () => {
     );
     setTestState((state) => ({ ...state, totalUrls }));
 
+    const results: ExtendedBenchmarkResult[] = [];
+
     for (const testObject of testObjects) {
       for (const url of testObject.urls) {
-        const result = await runBenchmark(url, chunkSize);
+        const result = await runBenchmark(url, chunkSize, TESTS_COUNT);
         const extendedResult: ExtendedBenchmarkResult = {
           ...result,
           objectType: testObject.type,
           uid,
           referenceDownloadSpeedBps,
           referenceLatency,
+          version: "0.1.0",
         };
+        if (result.status === "success") {
+          console.log(
+            url,
+            formatMbps(result.downloadSpeedBps),
+            formatMs(result.ttfb)
+          );
+        } else {
+          console.log(extendedResult);
+        }
+        results.push(extendedResult);
         setTestState((state) => ({
           ...state,
-          results: [...(state.results || []), extendedResult],
+          results,
         }));
       }
     }
+
+    if (PUBLISH_RESULTS) {
+      try {
+        const response = await fetch(import.meta.env.VITE_APP_RESULTS_URL, {
+          method: "POST",
+          headers: {
+            "Content-Type": "application/json",
+          },
+          body: JSON.stringify(results),
+        });
+        if (!response.ok) {
+          throw new Error(`Failed to upload results (${response.status})`);
+        }
+      } catch (e) {
+        console.error(e);
+        setTestState((state) => ({
+          ...state,
+          error: "Failed to upload results",
+          isRunning: false,
+        }));
+      }
+    }
+
     setTestState((state) => ({ ...state, isRunning: false }));
   };
 
-  const exportJsonResult = () => {
-    if (!testState.results) return;
-
-    const blob = new Blob([JSON.stringify(testState.results, null, 2)], {
-      type: "application/json",
-    });
-    const url = URL.createObjectURL(blob);
-    const a = document.createElement("a");
-    a.href = url;
-    a.download = `benchmark-${testVideoId}-${Date.now()}.json`;
-    a.click();
-  };
-
-  // average ttfb, average download speed, best download speed, worst download speed
   const _stats = testState.results?.reduce(
     (acc, result) => {
       if ("error" in result) return acc;
@@ -194,14 +207,12 @@ export const App = () => {
                 onChange={(e) => setChunkSize(e.target.value as number)}
                 disabled={testState.isRunning}
               >
-                <MenuItem value={1024 * 1024 * 10}>10MB</MenuItem>
-                <MenuItem value={1024 * 1024 * 25}>25MB</MenuItem>
-                <MenuItem value={1024 * 1024 * 50}>50MB</MenuItem>
-                <MenuItem value={1024 * 1024 * 100}>100MB</MenuItem>
-                <MenuItem value={1024 * 1024 * 200}>200MB</MenuItem>
+                <MenuItem value={10 * 1e6}>Small</MenuItem>
+                <MenuItem value={25 * 1e6}>Normal</MenuItem>
               </Select>
               <FormHelperText>
-                This much will be downloaded from every distributor
+                You will download around{" "}
+                {(chunkSize * TESTS_COUNT * 9) / 1e6 + 30}MB
               </FormHelperText>
             </FormControl>
           </Grid>
@@ -216,21 +227,6 @@ export const App = () => {
               Run test
             </Button>
           </Grid>
-          {!testState.isRunning && !!testState.results && (
-            <>
-              <Grid xs={12} sm={3}>
-                <Button
-                  fullWidth
-                  variant="contained"
-                  color="success"
-                  onClick={exportJsonResult}
-                >
-                  Save JSON
-                </Button>
-              </Grid>
-            </>
-          )}
-          {/* rest */}
 
           {testState.error && (
             <Grid xs={12}>
@@ -262,11 +258,10 @@ export const App = () => {
                   <br />
                   Average TTFB: {stats?.avgTtfb.toFixed(2)}ms
                   <br />
-                  Best download speed:{" "}
-                  {(stats?.bestDownloadSpeedBps / 1024 / 1024).toFixed(2)}Mbps
+                  Best download speed: {formatMbps(stats.bestDownloadSpeedBps)}
                   <br />
                   Average download speed:{" "}
-                  {(stats?.avgDownloadSpeedBps / 1024 / 1024).toFixed(2)}Mbps
+                  {formatMbps(stats.avgDownloadSpeedBps)}
                 </span>
               </Alert>
             </Grid>
