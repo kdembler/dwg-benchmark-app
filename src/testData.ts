@@ -49,7 +49,7 @@ export async function gatherTestObjects(
   videoId: string
 ): Promise<TestObject[] | null> {
   const data = await request(
-    "https://monitoring.joyutils.org/query/graphql",
+    "https://query.joystream.org/graphql",
     getVideoQueryDocument,
     { id: videoId }
   );
