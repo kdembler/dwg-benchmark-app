@@ -144,37 +144,7 @@ export const App = () => {
     setTestState((state) => ({ ...state, isRunning: false }));
   };
 
-  const _stats = testState.results?.reduce(
-    (acc, result) => {
-      if ("error" in result) return acc;
-      return {
-        totalTtfb: acc.totalTtfb + result.ttfb,
-        lowestTtfb: acc.lowestTtfb > result.ttfb ? result.ttfb : acc.lowestTtfb,
-        totalDownloadSpeedBps:
-          acc.totalDownloadSpeedBps + result.downloadSpeedBps,
-        bestDownloadSpeedBps:
-          acc.bestDownloadSpeedBps > result.downloadSpeedBps
-            ? acc.bestDownloadSpeedBps
-            : result.downloadSpeedBps,
-      };
-    },
-    {
-      totalTtfb: 0,
-      lowestTtfb: Number.MAX_SAFE_INTEGER,
-      totalDownloadSpeedBps: 0,
-      bestDownloadSpeedBps: Number.MIN_SAFE_INTEGER,
-    }
-  );
-  const stats =
-    _stats && testState.results
-      ? {
-          avgTtfb: _stats.totalTtfb / testState.results.length,
-          lowestTtfb: _stats.lowestTtfb,
-          avgDownloadSpeedBps:
-            _stats.totalDownloadSpeedBps / testState.results.length,
-          bestDownloadSpeedBps: _stats.bestDownloadSpeedBps,
-        }
-      : null;
+  const stats = computeStats(testState.results);
 
   return (
     <Container
@@ -271,3 +241,47 @@ export const App = () => {
     </Container>
   );
 };
+
+function computeStats(results?: ExtendedBenchmarkResult[] | null) {
+  if (!results) return null;
+
+  const successResults = results.filter((r) => r.status === "success");
+  const mediaResults = successResults.filter((r) => r.objectType === "media");
+
+  const ttfbStats = successResults.reduce(
+    (acc, result) => {
+      if ("error" in result) return acc;
+      return {
+        totalTtfb: acc.totalTtfb + result.ttfb,
+        lowestTtfb: acc.lowestTtfb > result.ttfb ? result.ttfb : acc.lowestTtfb,
+      };
+    },
+    { totalTtfb: 0, lowestTtfb: Number.MAX_SAFE_INTEGER }
+  );
+
+  const downloadSpeedStats = mediaResults.reduce(
+    (acc, result) => {
+      if ("error" in result) return acc;
+      return {
+        totalDownloadSpeedBps:
+          acc.totalDownloadSpeedBps + result.downloadSpeedBps,
+        bestDownloadSpeedBps:
+          acc.bestDownloadSpeedBps > result.downloadSpeedBps
+            ? acc.bestDownloadSpeedBps
+            : result.downloadSpeedBps,
+      };
+    },
+    {
+      totalDownloadSpeedBps: 0,
+      bestDownloadSpeedBps: Number.MIN_SAFE_INTEGER,
+    }
+  );
+
+  return {
+    avgTtfb: ttfbStats.totalTtfb / successResults.length,
+    lowestTtfb: ttfbStats.lowestTtfb,
+    avgDownloadSpeedBps:
+      downloadSpeedStats.totalDownloadSpeedBps / mediaResults.length,
+    bestDownloadSpeedBps: downloadSpeedStats.bestDownloadSpeedBps,
+  };
+}
