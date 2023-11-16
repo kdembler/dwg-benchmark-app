@@ -138,6 +138,18 @@ async function runSingleBenchmark(
       downloadTime = readTime;
     }
 
+    if (ttfb < 0) {
+      ttfb = responseStartTime - startFetchTime;
+    }
+
+    if (totalRequestTime < 0) {
+      totalRequestTime = endFetchTime - startFetchTime;
+    }
+
+    if (downloadTime < 0) {
+      downloadTime = readTime;
+    }
+
     if (totalRequestTime < 30) {
       // too good to be true
       return {
