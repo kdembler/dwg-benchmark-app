@@ -12,4 +12,5 @@ if (result.status === "error") {
 } else {
   console.log("Download speed: ", formatMbps(result.downloadSpeedBps));
   console.log("TTFB: ", formatMs(result.ttfb));
+  console.log("Downloaded: ", result.downloadSize / 1e6, "MB");
 }

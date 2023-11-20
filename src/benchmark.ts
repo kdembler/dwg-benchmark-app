@@ -48,7 +48,7 @@ export async function runBenchmark(
   for (let i = 0; i < numRuns; i++) {
     const result = await withTimeout(
       runSingleBenchmark(url, maxDownloadSize, maxTime),
-      maxTime + 200
+      maxTime + 2000
     );
     if (!result) {
       results.push({
@@ -70,17 +70,10 @@ async function runSingleBenchmark(
   maxTime: number
 ): Promise<BenchmarkResult> {
   console.log(`Running test for ${url}`);
-  let hasTimedOut = false;
   try {
     const controller = new AbortController();
     const signal = controller.signal;
-    const fullTimeoutId = setTimeout(() => {
-      hasTimedOut = true;
-      return controller.abort();
-    }, maxTime);
     const responseTimeoutId = setTimeout(() => {
-      hasTimedOut = true;
-      clearTimeout(fullTimeoutId);
       return controller.abort();
     }, 5000);
 
@@ -103,8 +96,28 @@ async function runSingleBenchmark(
     }
 
     const startReadTime = performance.now();
-    const receivedSize = (await response.arrayBuffer()).byteLength;
-    clearTimeout(fullTimeoutId);
+    let receivedSize = 0;
+    const reader = response.body?.getReader();
+    if (!reader) {
+      return {
+        status: "error",
+        url,
+        error: "No reader found",
+      };
+    }
+    while (true) {
+      const { done, value } = await reader.read();
+      if (done) {
+        break;
+      }
+      receivedSize += value?.byteLength ?? 0;
+      if (performance.now() - startReadTime > maxTime) {
+        console.log("Aborting due to timeout");
+        reader.cancel();
+        controller.abort();
+        break;
+      }
+    }
     const endFetchTime = performance.now();
     const readTime = endFetchTime - startReadTime;
 
@@ -187,7 +200,7 @@ async function runSingleBenchmark(
     return {
       status: "error",
       url,
-      error: hasTimedOut ? `timeout ${maxTime}` : (e as any)?.message,
+      error: (e as any)?.message,
     };
   }
 }

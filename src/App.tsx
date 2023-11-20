@@ -232,6 +232,8 @@ export const App = () => {
                   <br />
                   Average download speed:{" "}
                   {formatMbps(stats.avgDownloadSpeedBps)}
+                  <br />
+                  User ID: {uid}
                 </span>
               </Alert>
             </Grid>
